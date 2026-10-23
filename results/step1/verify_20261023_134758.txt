@@ -1,0 +1,306 @@
+Scenario A verification - 2026-10-23T13:47:58+03:00 - host vasif-VMware-Virtual-Platform
+
+==================== 1. Namespaces ====================
+$ ip netns list
+core (id: 2)
+access (id: 1)
+ue (id: 0)
+
+[PASS] namespace ue exists
+[PASS] namespace access exists
+[PASS] namespace core exists
+
+==================== 2. Interfaces and addresses ====================
+--- ns ue ---
+$ ip -n ue -br addr
+lo               UNKNOWN        127.0.0.1/8 ::1/128 
+eth0@if6         UP             10.0.1.10/24 fe80::9883:43ff:fecf:c5a8/64 
+
+--- ns access ---
+$ ip -n access -br addr
+lo               UNKNOWN        127.0.0.1/8 ::1/128 
+acc-ue@if7       UP             10.0.1.1/24 fe80::58e7:68ff:fe2b:addd/64 
+acc-core@if8     UP             10.0.2.1/24 fe80::3cc0:77ff:fe72:cac9/64 
+
+--- ns core ---
+$ ip -n core -br addr
+lo               UNKNOWN        127.0.0.1/8 ::1/128 
+core-acc@if9     UP             10.0.2.2/24 fe80::8cb:80ff:fe3b:b8c8/64 
+core-dn@if10     UP             10.0.3.1/24 fe80::f809:aaff:fe69:afbc/64 
+
+--- host (integration boundary + Docker DN bridge) ---
+$ ip -br addr show host-dn
+host-dn@if11     UP             10.0.3.2/24 fe80::608a:10ff:feb1:32e4/64 
+
+$ ip -br addr show br-dn
+br-dn            UP             10.0.4.1/24 fe80::88b9:21ff:fec8:4e46/64 
+
+[PASS] UE      eth0 has 10.0.1.10
+[PASS] Access  acc-ue has 10.0.1.1
+[PASS] Access  acc-core has 10.0.2.1
+[PASS] Core    core-acc has 10.0.2.2
+[PASS] Core    core-dn has 10.0.3.1
+[PASS] Host    host-dn has 10.0.3.2
+[PASS] Host    br-dn has 10.0.4.1
+
+==================== 3. Routing tables and forwarding ====================
+--- ns ue ---
+$ ip -n ue route
+default via 10.0.1.1 dev eth0 
+10.0.1.0/24 dev eth0 proto kernel scope link src 10.0.1.10 
+
+--- ns access ---
+$ ip -n access route
+default via 10.0.2.2 dev acc-core 
+10.0.1.0/24 dev acc-ue proto kernel scope link src 10.0.1.1 
+10.0.2.0/24 dev acc-core proto kernel scope link src 10.0.2.1 
+
+--- ns core ---
+$ ip -n core route
+default via 10.0.3.2 dev core-dn 
+10.0.1.0/24 via 10.0.2.1 dev core-acc 
+10.0.2.0/24 dev core-acc proto kernel scope link src 10.0.2.2 
+10.0.3.0/24 dev core-dn proto kernel scope link src 10.0.3.1 
+
+--- host (relevant routes) ---
+$ bash -c ip route | grep -E '10\.0\.[1-4]\.'
+10.0.1.0/24 via 10.0.3.1 dev host-dn 
+10.0.2.0/24 via 10.0.3.1 dev host-dn 
+10.0.3.0/24 dev host-dn proto kernel scope link src 10.0.3.2 
+10.0.4.0/24 dev br-dn proto kernel scope link src 10.0.4.1 
+
+[PASS] ip_forward=1 in access
+[PASS] ip_forward=1 in core
+[PASS] ip_forward=1 on host
+--- Forwarding decision at every hop (ip route get) ---
+$ ip -n ue route get 10.0.4.10
+10.0.4.10 via 10.0.1.1 dev eth0 src 10.0.1.10 uid 0 
+    cache 
+
+$ ip -n access route get 10.0.4.10
+10.0.4.10 via 10.0.2.2 dev acc-core src 10.0.2.1 uid 0 
+    cache 
+
+$ ip -n core route get 10.0.4.10
+10.0.4.10 via 10.0.3.2 dev core-dn src 10.0.3.1 uid 0 
+    cache 
+
+$ ip route get 10.0.4.10
+10.0.4.10 dev br-dn src 10.0.4.1 uid 0 
+    cache 
+
+$ ip route get 10.0.1.10
+10.0.1.10 via 10.0.3.1 dev host-dn src 10.0.3.2 uid 0 
+    cache 
+
+[PASS] UE     -> app next hop 10.0.1.1
+[PASS] Access -> app next hop 10.0.2.2
+[PASS] Core   -> app next hop 10.0.3.2
+[PASS] Host   -> app out br-dn
+[PASS] Host   -> UE next hop 10.0.3.1
+
+==================== 4. Docker Data Network and services ====================
+$ docker compose -f docker/compose.yml ps
+NAME                IMAGE                  COMMAND                  SERVICE   CREATED              STATUS              PORTS
+scenario-a-iperf3   networkstatic/iperf3   "iperf3 -s"              iperf3    About a minute ago   Up 59 seconds       5201/tcp
+scenario-a-nginx    nginx:stable-alpine    "/docker-entrypoint.…"   nginx     About a minute ago   Up About a minute   80/tcp
+
+$ docker network inspect scenario-a-dn --format name={{.Name}} driver={{.Driver}} subnet={{(index .IPAM.Config 0).Subnet}} gw={{(index .IPAM.Config 0).Gateway}} options={{.Options}}
+name=scenario-a-dn driver=bridge subnet=10.0.4.0/24 gw=10.0.4.1 options=map[com.docker.network.bridge.gateway_mode_ipv4:routed com.docker.network.bridge.name:br-dn]
+
+$ docker inspect -f {{.Name}} ip={{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}} state={{.State.Status}} scenario-a-nginx scenario-a-iperf3
+/scenario-a-nginx ip=10.0.4.10 state=running
+/scenario-a-iperf3 ip=10.0.4.20 state=running
+
+[PASS] Nginx container running
+[PASS] iperf3 container running
+--- Listening sockets inside each container (host ss in the container's netns) ---
+--- scenario-a-nginx (pid 5484) ---
+$ nsenter -t 5484 -n ss -ltnup
+Netid State  Recv-Q Send-Q Local Address:Port  Peer Address:PortProcess                                                                         
+udp   UNCONN 0      0         127.0.0.11:49149      0.0.0.0:*    users:(("dockerd",pid=1251,fd=35))                                             
+tcp   LISTEN 0      4096      127.0.0.11:41511      0.0.0.0:*    users:(("dockerd",pid=1251,fd=36))                                             
+tcp   LISTEN 0      511          0.0.0.0:80         0.0.0.0:*    users:(("nginx",pid=5555,fd=6),("nginx",pid=5554,fd=6),("nginx",pid=5484,fd=6))
+
+--- scenario-a-iperf3 (pid 5557) ---
+$ nsenter -t 5557 -n ss -ltnup
+Netid State  Recv-Q Send-Q Local Address:Port  Peer Address:PortProcess                            
+udp   UNCONN 0      0         127.0.0.11:51058      0.0.0.0:*    users:(("dockerd",pid=1251,fd=44))
+tcp   LISTEN 0      4096      127.0.0.11:35131      0.0.0.0:*    users:(("dockerd",pid=1251,fd=45))
+tcp   LISTEN 0      4096               *:5201             *:*    users:(("iperf3",pid=5557,fd=3))  
+
+[PASS] Nginx listening on TCP 80
+[PASS] iperf3 listening on TCP 5201
+--- Host firewall rules for the DN ---
+$ iptables -n -v -L DOCKER-USER
+Chain DOCKER-USER (1 references)
+ pkts bytes target     prot opt in     out     source               destination         
+    0     0 ACCEPT     all  --  *      *       10.0.4.0/24          10.0.3.0/24         
+    0     0 ACCEPT     all  --  *      *       10.0.3.0/24          10.0.4.0/24         
+    0     0 ACCEPT     all  --  *      *       10.0.4.0/24          10.0.2.0/24         
+    0     0 ACCEPT     all  --  *      *       10.0.2.0/24          10.0.4.0/24         
+ 211K   11M ACCEPT     all  --  *      *       10.0.4.0/24          10.0.1.0/24         
+ 359K   16G ACCEPT     all  --  *      *       10.0.1.0/24          10.0.4.0/24         
+
+
+==================== 5. Hop-by-hop reachability from the UE (ICMP) ====================
+$ in_ns ue ping -c 3 -i 0.2 -W 1 10.0.1.1
+PING 10.0.1.1 (10.0.1.1) 56(84) bytes of data.
+64 bytes from 10.0.1.1: icmp_seq=1 ttl=64 time=0.148 ms
+64 bytes from 10.0.1.1: icmp_seq=2 ttl=64 time=0.040 ms
+64 bytes from 10.0.1.1: icmp_seq=3 ttl=64 time=0.044 ms
+
+--- 10.0.1.1 ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 410ms
+rtt min/avg/max/mdev = 0.040/0.077/0.148/0.050 ms
+
+[PASS] UE ping 10.0.1.1
+$ in_ns ue ping -c 3 -i 0.2 -W 1 10.0.2.2
+PING 10.0.2.2 (10.0.2.2) 56(84) bytes of data.
+64 bytes from 10.0.2.2: icmp_seq=1 ttl=63 time=0.055 ms
+64 bytes from 10.0.2.2: icmp_seq=2 ttl=63 time=0.047 ms
+64 bytes from 10.0.2.2: icmp_seq=3 ttl=63 time=0.055 ms
+
+--- 10.0.2.2 ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 410ms
+rtt min/avg/max/mdev = 0.047/0.052/0.055/0.003 ms
+
+[PASS] UE ping 10.0.2.2
+$ in_ns ue ping -c 3 -i 0.2 -W 1 10.0.3.2
+PING 10.0.3.2 (10.0.3.2) 56(84) bytes of data.
+64 bytes from 10.0.3.2: icmp_seq=1 ttl=62 time=0.270 ms
+64 bytes from 10.0.3.2: icmp_seq=2 ttl=62 time=0.065 ms
+64 bytes from 10.0.3.2: icmp_seq=3 ttl=62 time=0.130 ms
+
+--- 10.0.3.2 ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 412ms
+rtt min/avg/max/mdev = 0.065/0.155/0.270/0.085 ms
+
+[PASS] UE ping 10.0.3.2
+$ in_ns ue ping -c 3 -i 0.2 -W 1 10.0.4.1
+PING 10.0.4.1 (10.0.4.1) 56(84) bytes of data.
+64 bytes from 10.0.4.1: icmp_seq=1 ttl=62 time=0.157 ms
+64 bytes from 10.0.4.1: icmp_seq=2 ttl=62 time=0.062 ms
+64 bytes from 10.0.4.1: icmp_seq=3 ttl=62 time=0.059 ms
+
+--- 10.0.4.1 ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 416ms
+rtt min/avg/max/mdev = 0.059/0.092/0.157/0.045 ms
+
+[PASS] UE ping 10.0.4.1
+$ in_ns ue ping -c 3 -i 0.2 -W 1 10.0.4.10
+PING 10.0.4.10 (10.0.4.10) 56(84) bytes of data.
+64 bytes from 10.0.4.10: icmp_seq=1 ttl=61 time=0.085 ms
+64 bytes from 10.0.4.10: icmp_seq=2 ttl=61 time=0.077 ms
+64 bytes from 10.0.4.10: icmp_seq=3 ttl=61 time=0.086 ms
+
+--- 10.0.4.10 ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 408ms
+rtt min/avg/max/mdev = 0.077/0.082/0.086/0.004 ms
+
+[PASS] UE ping 10.0.4.10
+$ in_ns ue ping -c 3 -i 0.2 -W 1 10.0.4.20
+PING 10.0.4.20 (10.0.4.20) 56(84) bytes of data.
+64 bytes from 10.0.4.20: icmp_seq=1 ttl=61 time=0.133 ms
+64 bytes from 10.0.4.20: icmp_seq=2 ttl=61 time=0.073 ms
+64 bytes from 10.0.4.20: icmp_seq=3 ttl=61 time=0.124 ms
+
+--- 10.0.4.20 ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 416ms
+rtt min/avg/max/mdev = 0.073/0.110/0.133/0.026 ms
+
+[PASS] UE ping 10.0.4.20
+
+==================== 6. Path taken UE -> application server (traceroute) ====================
+traceroute to 10.0.4.10 (10.0.4.10), 30 hops max, 60 byte packets
+ 1  10.0.1.1  0.096 ms
+ 2  10.0.2.2  0.029 ms
+ 3  10.0.3.2  0.068 ms
+ 4  10.0.4.10  0.078 ms
+
+Hops: 10.0.1.1 10.0.2.2 10.0.3.2 10.0.4.10
+[PASS] path goes 10.0.1.1 -> 10.0.2.2 -> 10.0.3.2 -> 10.0.4.10
+
+==================== 7. Application test: HTTP UE -> Nginx ====================
+$ in_ns ue curl -sS -v http://10.0.4.10:80/
+*   Trying 10.0.4.10:80...
+* Established connection to 10.0.4.10 (10.0.4.10 port 80) from 10.0.1.10 port 55182 
+* using HTTP/1.x
+> GET / HTTP/1.1
+> Host: 10.0.4.10
+> User-Agent: curl/8.18.0
+> Accept: */*
+> 
+* Request completely sent off
+< HTTP/1.1 200 OK
+< Server: nginx/1.30.6
+< Date: Fri, 23 Oct 2026 10:48:04 GMT
+< Content-Type: text/html
+< Content-Length: 360
+< Last-Modified: Thu, 22 Oct 2026 22:23:02 GMT
+< Connection: keep-alive
+< ETag: "6ada8cc6-168"
+< Accept-Ranges: bytes
+< 
+{ [360 bytes data]
+* Connection #0 to host 10.0.4.10:80 left intact
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Scenario A Application Server</title></head>
+<body>
+<h1>Scenario A - Application Server (Nginx)</h1>
+<p>UE / Client &rarr; Access Network &rarr; Core / Gateway &rarr; Data Network &rarr; Application Server</p>
+<p>If you can read this from the UE namespace, the complete path works.</p>
+</body>
+</html>
+
+$ in_ns ue curl -sS -o /dev/null -w http_code=%{http_code} local=%{local_ip}:%{local_port} remote=%{remote_ip}:%{remote_port} size=%{size_download}B tcp_connect=%{time_connect}s ttfb=%{time_starttransfer}s total=%{time_total}s\n http://10.0.4.10:80/
+http_code=200 local=10.0.1.10:55186 remote=10.0.4.10:80 size=360B tcp_connect=0.000428s ttfb=0.000928s total=0.001434s
+
+[PASS] HTTP 200 from http://10.0.4.10:80/
+[PASS] Response body is the Scenario A page
+--- Nginx access log (client address as seen by the server) ---
+$ docker logs --tail 5 scenario-a-nginx
+10.0.1.10:44044 -> 10.0.4.10:80 "GET / HTTP/1.1" 200 360 rt=0.000
+10.0.1.10:55182 -> 10.0.4.10:80 "GET / HTTP/1.1" 200 360 rt=0.000
+10.0.1.10:55186 -> 10.0.4.10:80 "GET / HTTP/1.1" 200 360 rt=0.000
+10.0.1.10:55200 -> 10.0.4.10:80 "GET / HTTP/1.1" 200 360 rt=0.000
+10.0.1.10:55216 -> 10.0.4.10:80 "GET / HTTP/1.1" 200 360 rt=0.000
+
+[PASS] Nginx saw the real UE address 10.0.1.10 (no NAT on the path)
+
+==================== 8. Measurement endpoint: iperf3 UE -> iperf3 server ====================
+$ in_ns ue iperf3 -c 10.0.4.20 -p 5201 -t 3
+Connecting to host 10.0.4.20, port 5201
+[  5] local 10.0.1.10 port 42694 connected to 10.0.4.20 port 5201
+[ ID] Interval           Transfer     Bitrate         Retr  Cwnd
+[  5]   0.00-1.00   sec  3.19 GBytes  27.4 Gbits/sec    0   2.08 MBytes       
+[  5]   1.00-2.00   sec  3.39 GBytes  29.1 Gbits/sec    0   3.38 MBytes       
+[  5]   2.00-3.00   sec  2.65 GBytes  22.7 Gbits/sec    1   4.12 MBytes       
+- - - - - - - - - - - - - - - - - - - - - - - - -
+[ ID] Interval           Transfer     Bitrate         Retr
+[  5]   0.00-3.00   sec  9.23 GBytes  26.4 Gbits/sec    1            sender
+[  5]   0.00-3.00   sec  9.23 GBytes  26.4 Gbits/sec                  receiver
+
+iperf Done.
+
+[PASS] iperf3 TCP test completes
+$ in_ns ue iperf3 -c 10.0.4.20 -p 5201 -u -b 10M -t 3
+Connecting to host 10.0.4.20, port 5201
+[  5] local 10.0.1.10 port 47527 connected to 10.0.4.20 port 5201
+[ ID] Interval           Transfer     Bitrate         Total Datagrams
+[  5]   0.00-1.00   sec  1.19 MBytes  10.0 Mbits/sec  865  
+[  5]   1.00-2.00   sec  1.19 MBytes  9.99 Mbits/sec  862  
+[  5]   2.00-3.00   sec  1.19 MBytes  10.0 Mbits/sec  864  
+- - - - - - - - - - - - - - - - - - - - - - - - -
+[ ID] Interval           Transfer     Bitrate         Jitter    Lost/Total Datagrams
+[  5]   0.00-3.00   sec  3.58 MBytes  10.0 Mbits/sec  0.000 ms  0/2591 (0%)  sender
+[  5]   0.00-3.00   sec  3.58 MBytes  10.0 Mbits/sec  0.072 ms  0/2591 (0%)  receiver
+
+iperf Done.
+
+[PASS] iperf3 UDP test completes
+
+==================== SUMMARY ====================
+PASS=34 FAIL=0
+Evidence saved to results/step1/verify_20261023_134758.txt

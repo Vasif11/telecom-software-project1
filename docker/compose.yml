@@ -1,0 +1,40 @@
+# Containerized Data Network for Scenario A.
+# A user-defined bridge (br-dn, 10.0.4.0/24) holds the application server (Nginx)
+# and the measurement endpoint (iperf3) at fixed IPs.
+name: scenario-a
+
+services:
+  nginx:
+    image: nginx:stable-alpine
+    container_name: scenario-a-nginx
+    restart: unless-stopped
+    volumes:
+      - ./nginx/html:/usr/share/nginx/html:ro
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      dn:
+        ipv4_address: 10.0.4.10
+
+  iperf3:
+    image: networkstatic/iperf3
+    container_name: scenario-a-iperf3
+    restart: unless-stopped
+    command: ["-s"]          # listens on TCP+UDP 5201
+    networks:
+      dn:
+        ipv4_address: 10.0.4.20
+
+networks:
+  dn:
+    name: scenario-a-dn
+    driver: bridge
+    driver_opts:
+      # Fixed interface name on the host so tcpdump commands are stable.
+      com.docker.network.bridge.name: br-dn
+      # "routed" = no NAT/masquerade and no port publishing needed: the UE (10.0.1.10)
+      # reaches 10.0.4.10 by plain IP routing, and Nginx sees the real UE address.
+      com.docker.network.bridge.gateway_mode_ipv4: routed
+    ipam:
+      config:
+        - subnet: 10.0.4.0/24
+          gateway: 10.0.4.1
